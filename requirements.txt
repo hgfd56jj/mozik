@@ -1,6 +1,6 @@
-python-telegram-bot==20.3
-google-cloud-texttospeech==2.14.1
+python-telegram-bot[webhooks]==20.8
+google-cloud-texttospeech
 requests
-pytz
 ffmpeg-python
 flask
+pytz
