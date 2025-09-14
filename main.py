@@ -23,7 +23,7 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_key.json"
 # 🛠 משתני סביבה
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YMOT_TOKEN = os.getenv("YMOT_TOKEN")
-YMOT_PATH = os.getenv("YMOT_PATH", "ivr2:90/")
+YMOT_PATH = os.getenv("YMOT_PATH", "ivr2:97/")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # למשל: https://musika-48ua.onrender.com
 
 # 🧹 ניקוי טקסט בסיסי
