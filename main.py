@@ -197,10 +197,10 @@ print("🚀 הבוט מאזין לערוץ ומעלה לשלוחה 🎧")
 while True:
     try:
         app.run_polling(
-            poll_interval=2.0,   # כל כמה שניות לבדוק הודעות חדשות
+            poll_interval=9.0,   # כל כמה שניות לבדוק הודעות חדשות
             timeout=30,          # כמה זמן לחכות לפני שנזרקת שגיאת TimedOut
             allowed_updates=Update.ALL_TYPES  # לוודא שכל סוגי ההודעות נתפסים
         )
     except Exception as e:
         print("❌ שגיאה כללית בהרצת הבוט:", e)
-        time.sleep(5)  # לחכות 5 שניות ואז להפעיל מחדש את הבוט
+        time.sleep(20)  # לחכות 5 שניות ואז להפעיל מחדש את הבוט
