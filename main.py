@@ -3,12 +3,12 @@ import json
 import subprocess
 import requests
 import base64
+import re
 from datetime import datetime
 import pytz
-import re
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from google.cloud import texttospeech
 
 # 🟡 כתיבת קובץ מפתח Google מ־BASE64
@@ -20,30 +20,36 @@ with open("google_key.json", "wb") as f:
     f.write(base64.b64decode(key_b64))
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_key.json"
 
-# 🛠 משתני סביבה
+# 🛠 משתנים מ־Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 YMOT_PATH = os.getenv("YMOT_PATH", "ivr2:97/")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # למשל: https://musika-48ua.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # לדוגמה: https://musika-48ua.onrender.com
 
-# 🧹 ניקוי טקסט בסיסי
-def clean_text(text):
-    text = re.sub(r'[^\u0590-\u05FF\s.,!?()\-\d]', '', text)  # רק עברית, מספרים וסימני פיסוק
-    text = re.sub(r'\s+', ' ', text).strip()
+# 🔢 פונקציות עזר
+def clean_text(text: str):
+    BLOCKED_PHRASES = [
+        "חדשות המוקד • בטלגרם: t.me/hamoked_il",
+        "בוואטסאפ: https://chat.whatsapp.com/LoxVwdYOKOAH2y2kaO8GQ7",
+        "לעדכוני הפרגוד בטלגרם"
+    ]
+    for phrase in BLOCKED_PHRASES:
+        text = text.replace(phrase, "")
+    text = re.sub(r"[^\w\s.,!?()\u0590-\u05FF:/]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
-# 🗣️ טקסט → MP3
-def text_to_mp3(text, filename='output.mp3'):
+def text_to_mp3(text, filename="output.mp3"):
     client = texttospeech.TextToSpeechClient()
     synthesis_input = texttospeech.SynthesisInput(text=text)
     voice = texttospeech.VoiceSelectionParams(
         language_code="he-IL",
         name="he-IL-Wavenet-B",
-        ssml_gender=texttospeech.SsmlVoiceGender.MALE
+        ssml_gender=texttospeech.SsmlVoiceGender.MALE,
     )
     audio_config = texttospeech.AudioConfig(
         audio_encoding=texttospeech.AudioEncoding.MP3,
-        speaking_rate=1.2
+        speaking_rate=1.2,
     )
     response = client.synthesize_speech(
         input=synthesis_input, voice=voice, audio_config=audio_config
@@ -51,30 +57,27 @@ def text_to_mp3(text, filename='output.mp3'):
     with open(filename, "wb") as out:
         out.write(response.audio_content)
 
-# 🎵 המרה ל־WAV
-def convert_to_wav(input_file, output_file='output.wav'):
-    subprocess.run([
-        'ffmpeg', '-i', input_file, '-ar', '8000', '-ac', '1', '-f', 'wav',
-        output_file, '-y'
-    ])
+def convert_to_wav(input_file, output_file="output.wav"):
+    subprocess.run(
+        ["ffmpeg", "-i", input_file, "-ar", "8000", "-ac", "1", "-f", "wav", output_file, "-y"]
+    )
 
-# 📤 העלאה לימות
 def upload_to_ymot(wav_file_path):
-    url = 'https://call2all.co.il/ym/api/UploadFile'
-    with open(wav_file_path, 'rb') as f:
-        files = {'file': (os.path.basename(wav_file_path), f, 'audio/wav')}
+    url = "https://call2all.co.il/ym/api/UploadFile"
+    with open(wav_file_path, "rb") as f:
+        files = {"file": (os.path.basename(wav_file_path), f, "audio/wav")}
         data = {
-            'token': YMOT_TOKEN,
-            'path': YMOT_PATH,
-            'convertAudio': '1',
-            'autoNumbering': 'true'
+            "token": YMOT_TOKEN,
+            "path": YMOT_PATH,
+            "convertAudio": "1",
+            "autoNumbering": "true",
         }
         response = requests.post(url, data=data, files=files)
     print("📞 תגובת ימות:", response.text)
 
-# 📨 טיפול בהודעות חדשות
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.channel_post
+# 📥 טיפול בהודעות מהערוץ
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post
     if not message:
         return
 
@@ -87,20 +90,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove("output.mp3")
         os.remove("output.wav")
 
-# ♻️ keep alive (כמו שהיה לך)
-from keep_alive import keep_alive
-keep_alive()
+    if message.voice or message.audio:
+        audio_file = await (message.voice or message.audio).get_file()
+        await audio_file.download_to_drive("audio.ogg")
+        convert_to_wav("audio.ogg", "audio.wav")
+        upload_to_ymot("audio.wav")
+        os.remove("audio.ogg")
+        os.remove("audio.wav")
 
-# ▶️ יצירת אפליקציה
+    if message.video:
+        video_file = await message.video.get_file()
+        await video_file.download_to_drive("video.mp4")
+        convert_to_wav("video.mp4", "video.wav")
+        upload_to_ymot("video.wav")
+        os.remove("video.mp4")
+        os.remove("video.wav")
+
+# ▶️ הפעלת האפליקציה
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
+app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
 
-print("🚀 הבוט מאזין בערוץ דרך Webhook 🎧")
+print("🚀 הבוט מאזין לערוץ דרך Webhook 🎧")
 
-# ▶️ הפעלה ב־Webhook
+# 🟡 רישום Webhook
+def set_webhook():
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    resp = requests.get(url, params={"url": webhook_url})
+    print("📡 setWebhook response:", resp.text)
+
+set_webhook()
+
+# ▶️ הרצה עם Webhook
 app.run_webhook(
     listen="0.0.0.0",
     port=int(os.environ.get("PORT", 8080)),
-    url_path=BOT_TOKEN,  # הנתיב שבו טלגרם ישלח
-    webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"  # הכתובת המלאה שטלגרם ישתמש בה
+    url_path="webhook",
+    webhook_url=f"{WEBHOOK_URL}/webhook"
 )
