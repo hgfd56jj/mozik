@@ -77,6 +77,9 @@ def clean_text(text):
         "r0527120704@gmail.com",
         "t.me/hamoked_il",
         "מיוזיק >>>> מה שמעניין",
+        "הכי חם ברשת - ’הערינג’",
+        "וואטצפ",
+        "טלגרם",
         "מיוזיק",
         "מיוזיק 🎶🎧 >>",
         "בטלגרם",
@@ -176,13 +179,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove("audio.ogg")
         os.remove("audio.wav")
 
-    if text:
-        # 🟢 שמירה של הטקסט המקורי (כולל הקישורים) ל-Ymot
-        original_text = text
+if text:
+    # 🟢 לנאום – קודם ננקה ביטויים אסורים
+    cleaned_text = clean_text(text)
 
-        # 🟢 לנאום – ננקה כל תו שאינו עברי
-        cleaned_for_tts = re.sub(r'[^א-ת\s.,!?()\u0590-\u05FF]', '', original_text)
-        cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
+    # 🟢 ואז ננקה תווים לא עבריים
+    cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
+    cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
         full_text = create_full_text(cleaned_for_tts)
         text_to_mp3(full_text, "output.mp3")
