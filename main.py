@@ -187,12 +187,12 @@ if text:
     cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
     cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
-        full_text = create_full_text(cleaned_for_tts)
-        text_to_mp3(full_text, "output.mp3")
-        convert_to_wav("output.mp3", "output.wav")
-        upload_to_ymot("output.wav")
-        os.remove("output.mp3")
-        os.remove("output.wav")
+    full_text = create_full_text(cleaned_for_tts)
+    text_to_mp3(full_text, "output.mp3")
+    convert_to_wav("output.mp3", "output.wav")
+    upload_to_ymot("output.wav")
+    os.remove("output.mp3")
+    os.remove("output.wav")
 
 from keep_alive import keep_alive
 keep_alive()
