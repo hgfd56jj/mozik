@@ -179,21 +179,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove("audio.ogg")
         os.remove("audio.wav")
 
-if text:
-    # 🟢 לנאום – קודם ננקה ביטויים אסורים
-    cleaned_text = clean_text(text)
+    if text:   # ✅ עכשיו הבדיקה בתוך הפונקציה
+        cleaned_text = clean_text(text)
+        cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
+        cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
-    # 🟢 ואז ננקה תווים לא עבריים
-    cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
-    cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
-
-    if cleaned_for_tts:
-        full_text = create_full_text(cleaned_for_tts)
-        text_to_mp3(full_text, "output.mp3")
-        convert_to_wav("output.mp3", "output.wav")
-        upload_to_ymot("output.wav")
-        os.remove("output.mp3")
-        os.remove("output.wav")
+        if cleaned_for_tts:
+            full_text = create_full_text(cleaned_for_tts)
+            text_to_mp3(full_text, "output.mp3")
+            convert_to_wav("output.mp3", "output.wav")
+            upload_to_ymot("output.wav")
+            os.remove("output.mp3")
+            os.remove("output.wav")
 
 from keep_alive import keep_alive
 keep_alive()
