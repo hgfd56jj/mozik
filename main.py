@@ -105,7 +105,11 @@ def clean_text(text):
     for phrase in BLOCKED_PHRASES:
         text = text.replace(phrase, '')
 
-    # ❌ כאן נשמור הכל להודעה אבל TTS יקרא רק עברית
+    # ❌ הסרת קישורים
+    text = re.sub(r'http\S+', '', text)   # מוחק http:// ו־https://
+    text = re.sub(r'www\.\S+', '', text)  # מוחק www.
+
+    # ❌ שמירת הודעה, אבל TTS יקרא רק עברית/ספרות/סימני פיסוק בסיסיים
     text = re.sub(r'[^\w\s.,!?()\u0590-\u05FF:/]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
