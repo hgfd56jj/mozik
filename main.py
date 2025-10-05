@@ -159,7 +159,7 @@ def upload_to_ymot(wav_file_path):
     print("📞 תגובת ימות:", response.text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = update.channel_post
     if not message:
         return
 
@@ -200,7 +200,7 @@ from keep_alive import keep_alive
 keep_alive()
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
+app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_message))
 
 print("🚀 הבוט מאזין לערוץ ומעלה לשלוחה 🎧")
 
