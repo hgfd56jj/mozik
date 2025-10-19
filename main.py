@@ -75,7 +75,7 @@ def clean_text(text):
         text = text.replace(phrase, '')
 
     # ❌ הסרת קישורים
-    text = re.sub(r'http\S+', '', text)   # מוחק http:// ו־https://
+    text = re.sub(r'http\S+', '', text)    # מוחק http:// ו־https://
     text = re.sub(r'www\.\S+', '', text)  # מוחק www.
 
     # ❌ שמירת הודעה, אבל TTS יקרא רק עברית/ספרות/סימני פיסוק בסיסיים
@@ -152,9 +152,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove("audio.ogg")
         os.remove("audio.wav")
 
-    if text:   # ✅ עכשיו הבדיקה בתוך הפונקציה
+    if text:    # ✅ עכשיו הבדיקה בתוך הפונקציה
         cleaned_text = clean_text(text)
         cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
+        cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
+
+        # 🆕 תוספת: הסרת מספרי טלפון לפני TTS
+        # מזהה רצפים דמויי טלפון עם 9 עד 11 ספרות (כולל מפרידים כגון רווח או מקף)
+        phone_number_regex = r'\b(\d[\s-]?){9,11}\d\b'
+        cleaned_for_tts = re.sub(phone_number_regex, '', cleaned_for_tts)
+        # ניקוי רווחים כפולים שנוצרו מההסרה
         cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
         if cleaned_for_tts:
@@ -177,7 +184,7 @@ print("🚀 הבוט מאזין לערוץ ומעלה לשלוחה 🎧")
 while True:
     try:
         app.run_polling(
-            poll_interval=9.0,   # כל כמה שניות לבדוק הודעות חדשות
+            poll_interval=9.0,    # כל כמה שניות לבדוק הודעות חדשות
             timeout=30,          # כמה זמן לחכות לפני שנזרקת שגיאת TimedOut
             allowed_updates=Update.ALL_TYPES  # לוודא שכל סוגי ההודעות נתפסים
         )
