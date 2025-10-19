@@ -30,18 +30,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 YMOT_PATH = os.getenv("YMOT_PATH", "ivr2:/97")
 
-# 🔢 המרת מספרים לעברית
-def num_to_hebrew_words(hour, minute):
-    hours_map = {
-        1:
-    }
-
-    minutes_map = {
-        0: "", 1: 
-    }
-
-    hour_12 = hour % 12 or 12
-    return f"{hours_map[hour_12]} {minutes_map[minute]}"
 
 def clean_text(text):
     import re
