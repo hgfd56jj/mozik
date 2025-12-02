@@ -75,21 +75,30 @@ def clean_text(text):
     return text
 
 def generate_audio_with_gemini(text, filename='output.pcm'):
-    """שולח טקסט למודל Gemini TTS ומקבל קובץ PCM גולמי"""
+    """
+    שולח טקסט למודל Gemini TTS ומקבל קובץ PCM גולמי.
+    *בוצע עדכון לבקש קצב קריאה מהיר (1.2)*
+    """
     print(f"🎙️ שולח ל-Gemini TTS: {text[:30]}...")
     try:
         # שימוש במודל ה-TTS החדש
         model = genai.GenerativeModel("models/gemini-2.5-flash-preview-tts")
         
-        # בניית הבקשה להקראה
+        # בניית הבקשה להקראה: שימוש בטקסט-לפרומפט (TTP) לבקשת מהירות
+        prompt = (
+            f"Please read the following news update in Hebrew clearly, professionally, "
+            f"and with a slightly fast pace (like a 1.2 speed): {text}"
+        )
+
         response = model.generate_content(
-            f"Please read the following news update in Hebrew clearly and professionally: {text}",
+            prompt,
             generation_config={
                 "response_modalities": ["AUDIO"],
                 "speech_config": {
                     "voice_config": {
                         "prebuilt_voice_config": {
-                            "voice_name": "Puck" # קול גברי (אופציות: Puck, Charon, Kore, Fenrir, Zephyr)
+                            # הקול המבוקש
+                            "voice_name": "Charon" 
                         }
                     }
                 }
@@ -97,12 +106,11 @@ def generate_audio_with_gemini(text, filename='output.pcm'):
         )
 
         # המודל מחזיר Raw PCM (L16) - שומרים לקובץ בינארי
-        # נדרש לחלץ את המידע מתוך ה-part הראשון
         if response.candidates and response.candidates[0].content.parts:
             audio_data = response.candidates[0].content.parts[0].inline_data.data
             with open(filename, 'wb') as f:
                 f.write(audio_data)
-            print("✅ אודיו נוצר בהצלחה (PCM format).")
+            print("✅ אודיו נוצר בהצלחה (PCM format) עם קול Charon וקצב מוגבר.")
         else:
             print("❌ לא התקבל מידע אודיו בתשובה.")
             raise Exception("Empty audio response from Gemini")
