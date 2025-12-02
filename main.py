@@ -1,39 +1,28 @@
 import os
-import json
 import subprocess
 import requests
-import base64
-from datetime import datetime
-import pytz
 import asyncio
 import re
 import time
-
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
-from google.cloud import texttospeech
 
-# 🟡 כתיבת קובץ מפתח Google מ־BASE64
-key_b64 = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_B64")
-if not key_b64:
-    raise Exception("❌ משתנה GOOGLE_APPLICATION_CREDENTIALS_B64 לא מוגדר או ריק")
-
-try:
-    with open("google_key.json", "wb") as f:
-        f.write(base64.b64decode(key_b64))
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_key.json"
-except Exception as e:
-    raise Exception("❌ נכשל בכתיבת קובץ JSON מ־BASE64: " + str(e))
+# 🛠 הגדרת מפתח Gemini
+# וודא שהגדרת את GEMINI_API_KEY במשתני הסביבה ב-Render
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    print("⚠️ אזהרה: GEMINI_API_KEY לא מוגדר. הבוט ייכשל בניסיון הקראה.")
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # 🛠 משתנים מ־Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 YMOT_PATH = os.getenv("YMOT_PATH", "ivr2:/97")
 
-
 def clean_text(text):
-    import re
-
+    """מנקה את הטקסט ממילים חסומות, קישורים וסימנים מיותרים"""
     BLOCKED_PHRASES = sorted([
         "חדשות המוקד • בטלגרם: t.me/hamoked_il",
         "בוואטסאפ: https://chat.whatsapp.com/LoxVwdYOKOAH2y2kaO8GQ7",
@@ -76,40 +65,71 @@ def clean_text(text):
         text = text.replace(phrase, '')
 
     # ❌ הסרת קישורים
-    text = re.sub(r'http\S+', '', text)    # מוחק http:// ו־https://
-    text = re.sub(r'www\.\S+', '', text)  # מוחק www.
+    text = re.sub(r'http\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
 
-    # ❌ שמירת הודעה, אבל TTS יקרא רק עברית/ספרות/סימני פיסוק בסיסיים
+    # ❌ TTS יקרא רק עברית/ספרות/סימני פיסוק בסיסיים
     text = re.sub(r'[^\w\s.,!?()\u0590-\u05FF:/]', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
     return text
 
-# ✅ שינוי: החזרת טקסט נקי בלבד ללא שעה וכותרת
-def create_full_text(text):
-    return text
+def generate_audio_with_gemini(text, filename='output.pcm'):
+    """שולח טקסט למודל Gemini TTS ומקבל קובץ PCM גולמי"""
+    print(f"🎙️ שולח ל-Gemini TTS: {text[:30]}...")
+    try:
+        # שימוש במודל ה-TTS החדש
+        model = genai.GenerativeModel("models/gemini-2.5-flash-preview-tts")
+        
+        # בניית הבקשה להקראה
+        response = model.generate_content(
+            f"Please read the following news update in Hebrew clearly and professionally: {text}",
+            generation_config={
+                "response_modalities": ["AUDIO"],
+                "speech_config": {
+                    "voice_config": {
+                        "prebuilt_voice_config": {
+                            "voice_name": "Puck" # קול גברי (אופציות: Puck, Charon, Kore, Fenrir, Zephyr)
+                        }
+                    }
+                }
+            }
+        )
 
-def text_to_mp3(text, filename='output.mp3'):
-    client = texttospeech.TextToSpeechClient()
-    synthesis_input = texttospeech.SynthesisInput(text=text)
-    voice = texttospeech.VoiceSelectionParams(
-        language_code="he-IL",
-        name="he-IL-Wavenet-B",
-        ssml_gender=texttospeech.SsmlVoiceGender.MALE
-    )
-    audio_config = texttospeech.AudioConfig(
-        audio_encoding=texttospeech.AudioEncoding.MP3,
-        speaking_rate=1.2  # 🔹 מהירות הקראה מוגברת
-    )
-    response = client.synthesize_speech(
-        input=synthesis_input,
-        voice=voice,
-        audio_config=audio_config
-    )
-    with open(filename, "wb") as out:
-        out.write(response.audio_content)
+        # המודל מחזיר Raw PCM (L16) - שומרים לקובץ בינארי
+        # נדרש לחלץ את המידע מתוך ה-part הראשון
+        if response.candidates and response.candidates[0].content.parts:
+            audio_data = response.candidates[0].content.parts[0].inline_data.data
+            with open(filename, 'wb') as f:
+                f.write(audio_data)
+            print("✅ אודיו נוצר בהצלחה (PCM format).")
+        else:
+            print("❌ לא התקבל מידע אודיו בתשובה.")
+            raise Exception("Empty audio response from Gemini")
 
-def convert_to_wav(input_file, output_file='output.wav'):
+    except Exception as e:
+        print(f"❌ שגיאה ביצירת אודיו עם Gemini: {e}")
+        raise e
+
+def convert_pcm_to_wav(input_file, output_file='output.wav'):
+    """
+    ממיר PCM גולמי (24kHz, 1 channel, s16le - ברירת המחדל של Gemini)
+    לפורמט WAV שימות המשיח יודעים לקרוא (8kHz)
+    """
+    subprocess.run([
+        'ffmpeg',
+        '-f', 's16le',       # פורמט הקלט (Raw PCM Signed 16-bit Little Endian)
+        '-ar', '24000',      # קצב דגימה של המודל (בד"כ 24k במודלים אלו)
+        '-ac', '1',          # ערוץ אחד (מונו)
+        '-i', input_file,    # קובץ הקלט
+        '-ar', '8000',       # יעד: 8000Hz לימות המשיח
+        '-ac', '1',          # יעד: מונו
+        '-f', 'wav',         # יעד: פורמט WAV
+        output_file, '-y'
+    ])
+
+def convert_regular_to_wav(input_file, output_file='output.wav'):
+    """המרה רגילה לקבצי אודיו/וידאו שנשלחו (לא TTS)"""
     subprocess.run([
         'ffmpeg', '-i', input_file, '-ar', '8000', '-ac', '1', '-f', 'wav',
         output_file, '-y'
@@ -117,6 +137,10 @@ def convert_to_wav(input_file, output_file='output.wav'):
 
 def upload_to_ymot(wav_file_path):
     url = 'https://call2all.co.il/ym/api/UploadFile'
+    if not os.path.exists(wav_file_path):
+        print("❌ הקובץ להעלאה לא נמצא:", wav_file_path)
+        return
+
     with open(wav_file_path, 'rb') as f:
         files = {'file': (os.path.basename(wav_file_path), f, 'audio/wav')}
         data = {
@@ -125,8 +149,11 @@ def upload_to_ymot(wav_file_path):
             'convertAudio': '1',
             'autoNumbering': 'true'
         }
-        response = requests.post(url, data=data, files=files)
-    print("📞 תגובת ימות:", response.text)
+        try:
+            response = requests.post(url, data=data, files=files)
+            print("📞 תגובת ימות:", response.text)
+        except Exception as e:
+            print(f"❌ שגיאה בהעלאה לימות: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
@@ -135,60 +162,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = message.text or message.caption
     has_video = message.video is not None
-    has_audio = message.voice or message.audio  # ✅ תוספת: גם אודיו
+    has_audio = message.voice or message.audio
 
+    # טיפול בוידאו
     if has_video:
-        video_file = await message.video.get_file()
-        await video_file.download_to_drive("video.mp4")
-        convert_to_wav("video.mp4", "video.wav")
-        upload_to_ymot("video.wav")
-        os.remove("video.mp4")
-        os.remove("video.wav")
+        try:
+            video_file = await message.video.get_file()
+            await video_file.download_to_drive("video.mp4")
+            convert_regular_to_wav("video.mp4", "video.wav")
+            upload_to_ymot("video.wav")
+        except Exception as e:
+            print(f"Error handling video: {e}")
+        finally:
+            if os.path.exists("video.mp4"): os.remove("video.mp4")
+            if os.path.exists("video.wav"): os.remove("video.wav")
 
+    # טיפול באודיו קיים
     if has_audio:
-        audio_file = await (message.voice or message.audio).get_file()
-        await audio_file.download_to_drive("audio.ogg")
-        convert_to_wav("audio.ogg", "audio.wav")
-        upload_to_ymot("audio.wav")
-        os.remove("audio.ogg")
-        os.remove("audio.wav")
+        try:
+            audio_obj = message.voice or message.audio
+            audio_file = await audio_obj.get_file()
+            # מזהים סיומת
+            ext = "ogg" if message.voice else "mp3"
+            filename = f"audio.{ext}"
+            
+            await audio_file.download_to_drive(filename)
+            convert_regular_to_wav(filename, "audio.wav")
+            upload_to_ymot("audio.wav")
+        except Exception as e:
+            print(f"Error handling audio: {e}")
+        finally:
+            if os.path.exists(filename): os.remove(filename)
+            if os.path.exists("audio.wav"): os.remove("audio.wav")
 
-    if text:    # ✅ עכשיו הבדיקה בתוך הפונקציה
+    # טיפול בטקסט -> המרה לדיבור (Gemini TTS)
+    if text:
         cleaned_text = clean_text(text)
+        # ניקוי נוסף עבור ה-TTS (השארת אותיות ומספרים בלבד)
         cleaned_for_tts = re.sub(r'[^0-9א-ת\s.,!?()\u0590-\u05FF]', '', cleaned_text)
         cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
-        # 🆕 תוספת: הסרת מספרי טלפון לפני TTS
-        # מזהה רצפים דמויי טלפון עם 9 עד 11 ספרות (כולל מפרידים כגון רווח או מקף)
+        # הסרת מספרי טלפון (כפי שהיה בקוד המקורי)
         phone_number_regex = r'\b(\d[\s-]?){9,11}\d\b'
         cleaned_for_tts = re.sub(phone_number_regex, '', cleaned_for_tts)
-        # ניקוי רווחים כפולים שנוצרו מההסרה
         cleaned_for_tts = re.sub(r'\s+', ' ', cleaned_for_tts).strip()
 
         if cleaned_for_tts:
-            full_text = create_full_text(cleaned_for_tts)
-            text_to_mp3(full_text, "output.mp3")
-            convert_to_wav("output.mp3", "output.wav")
-            upload_to_ymot("output.wav")
-            os.remove("output.mp3")
-            os.remove("output.wav")
+            try:
+                # 1. יצירת אודיו עם Gemini (מקבלים PCM)
+                generate_audio_with_gemini(cleaned_for_tts, "output.pcm")
+                
+                # 2. המרה מ-PCM ל-WAV של ימות
+                convert_pcm_to_wav("output.pcm", "output.wav")
+                
+                # 3. העלאה
+                upload_to_ymot("output.wav")
+            except Exception as e:
+                print(f"❌ כשל בתהליך ה-TTS: {e}")
+            finally:
+                if os.path.exists("output.pcm"): os.remove("output.pcm")
+                if os.path.exists("output.wav"): os.remove("output.wav")
 
-from keep_alive import keep_alive
-keep_alive()
+# שרת חי (Keep Alive) עבור Render
+try:
+    from keep_alive import keep_alive
+    keep_alive()
+except ImportError:
+    pass
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_message))
+if not BOT_TOKEN:
+    print("❌ שגיאה: BOT_TOKEN חסר.")
+else:
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_message))
 
-print("🚀 הבוט מאזין לערוץ ומעלה לשלוחה 🎧")
-
-# ▶️ לולאת הרצה אינסופית
-while True:
-    try:
-        app.run_polling(
-            poll_interval=9.0,    # כל כמה שניות לבדוק הודעות חדשות
-            timeout=30,          # כמה זמן לחכות לפני שנזרקת שגיאת TimedOut
-            allowed_updates=Update.ALL_TYPES  # לוודא שכל סוגי ההודעות נתפסים
-        )
-    except Exception as e:
-        print("❌ שגיאה כללית בהרצת הבוט:", e)
-        time.sleep(20)  # לחכות 5 שניות ואז להפעיל מחדש את הבוט
+    print("🚀 הבוט (Gemini TTS) מאזין לערוץ ומעלה לשלוחה 🎧")
+    
+    while True:
+        try:
+            app.run_polling(poll_interval=9.0, timeout=30, allowed_updates=Update.ALL_TYPES)
+        except Exception as e:
+            print("❌ שגיאה כללית:", e)
+            time.sleep(20)
