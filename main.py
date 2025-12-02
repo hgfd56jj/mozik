@@ -77,7 +77,7 @@ def clean_text(text):
 def generate_audio_with_gemini(text, filename='output.pcm'):
     """
     שולח טקסט למודל Gemini TTS ומקבל קובץ PCM גולמי.
-    *בוצע עדכון לבקש קצב קריאה מהיר (1.2)*
+    *בוצע עדכון לבקש קצב קריאה מהיר (1.3) וטון דרמטי*
     """
     print(f"🎙️ שולח ל-Gemini TTS: {text[:30]}...")
     try:
@@ -86,8 +86,8 @@ def generate_audio_with_gemini(text, filename='output.pcm'):
         
         # בניית הבקשה להקראה: שימוש בטקסט-לפרומפט (TTP) לבקשת מהירות
         prompt = (
-            f"Please read the following news update in Hebrew clearly, professionally, "
-            f"and with a slightly fast pace (like a 1.2 speed): {text}"
+            f"Please read the following news update in Hebrew clearly, dramatically, "
+            f"and with a fast pace (like a 1.3 speed): {text}"
         )
 
         response = model.generate_content(
@@ -98,7 +98,7 @@ def generate_audio_with_gemini(text, filename='output.pcm'):
                     "voice_config": {
                         "prebuilt_voice_config": {
                             # הקול המבוקש
-                            "voice_name": "Charon" 
+                            "voice_name": "Fenrir" 
                         }
                     }
                 }
@@ -110,7 +110,7 @@ def generate_audio_with_gemini(text, filename='output.pcm'):
             audio_data = response.candidates[0].content.parts[0].inline_data.data
             with open(filename, 'wb') as f:
                 f.write(audio_data)
-            print("✅ אודיו נוצר בהצלחה (PCM format) עם קול Charon וקצב מוגבר.")
+            print("✅ אודיו נוצר בהצלחה (PCM format) עם קול Fenrir וקצב מוגבר.")
         else:
             print("❌ לא התקבל מידע אודיו בתשובה.")
             raise Exception("Empty audio response from Gemini")
