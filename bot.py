@@ -1,0 +1,370 @@
+import os
+import json
+import subprocess
+import requests
+import base64
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import asyncio
+import re
+import time
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, TypeHandler, CommandHandler
+from google.cloud import texttospeech
+import logging
+
+# 🔧 הגדרת לוגים
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler("log.txt"),
+        logging.StreamHandler()
+    ]
+)
+
+# 🔒 מנעול לעיבוד הודעות
+processing_lock = asyncio.Lock()
+
+# ---------------------------------------------------------
+# ⚙️ הגדרות הערוצים
+# ---------------------------------------------------------
+# כאן מגדירים את ה-ID של הערוץ, השלוחה בימות, והטקסט שבא *אחרי* השעה.
+# הבוט יגיד לבד: "{שעה נוכחית} {intro_suffix}"
+# לדוגמה: "ארבע וחצי במבזקים פלוס"
+
+CHANNELS_CONFIG = {
+    # ערוץ A
+    -1003308764465: {  
+        "path": "ivr2:11/",
+        "intro_suffix": "בְּמִבְזָקִים-פְּלוּס,", # הטקסט שיבוא אחרי השעה
+        "merge_text": True  # לחבר טקסט ווידאו לקובץ אחד
+    },
+    # ערוץ B
+    -1003387160676: {
+        "path": "ivr2:22/",
+        "intro_suffix": "בחדשות המגזר.",
+        "merge_text": True
+    },
+    # ערוץ C
+    -1003403882019: {
+        "path": "ivr2:33/",
+        "intro_suffix": None, # ללא פתיח בכלל (רק תוכן ההודעה)
+        "merge_text": False # להעלות בנפרד
+    }
+}
+
+# ---------------------------------------------------------
+# 🟡 הגדרת Google TTS
+# ---------------------------------------------------------
+key_b64 = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_B64")
+if not key_b64:
+    logging.warning("⚠️ משתנה GOOGLE_APPLICATION_CREDENTIALS_B64 חסר! הבוט לא יוכל להמיר טקסט לקול.")
+else:
+    try:
+        with open("google_key.json", "wb") as f:
+            f.write(base64.b64decode(key_b64))
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_key.json"
+    except Exception as e:
+        logging.error(f"❌ נכשל בכתיבת קובץ מפתח גוגל: {e}")
+
+# 🛠 משתנים מ־Render
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+YMOT_TOKEN = os.getenv("YMOT_TOKEN")
+
+# קובץ רשימה שחורה
+BLACKLIST_FILE = "blacklist.json"
+
+# ---------------------------------------------------------
+# 🛡️ ניהול רשימה שחורה (Blacklist)
+# ---------------------------------------------------------
+def load_blacklist():
+    if not os.path.exists(BLACKLIST_FILE):
+        return []
+    try:
+        with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_blacklist(words):
+    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /addword [word]")
+        return
+    word = " ".join(context.args)
+    words = load_blacklist()
+    if word not in words:
+        words.append(word)
+        save_blacklist(words)
+        await update.message.reply_text(f"המילה '{word}' נוספה לרשימה השחורה.")
+    else:
+        await update.message.reply_text("המילה כבר קיימת ברשימה.")
+
+async def del_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /delword [word]")
+        return
+    word = " ".join(context.args)
+    words = load_blacklist()
+    if word in words:
+        words.remove(word)
+        save_blacklist(words)
+        await update.message.reply_text(f"המילה '{word}' הוסרה מהרשימה.")
+    else:
+        await update.message.reply_text("המילה לא נמצאה ברשימה.")
+
+async def list_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    words = load_blacklist()
+    if not words:
+        await update.message.reply_text("הרשימה ריקה.")
+    else:
+        await update.message.reply_text("מילים חסומות:\n" + ", ".join(words))
+
+# ---------------------------------------------------------
+# 🧹 פונקציות עזר לניקוי ועיבוד
+# ---------------------------------------------------------
+def clean_text(text):
+    if not text: return ""
+    
+    # 1. ניקוי לפי רשימה שחורה דינמית
+    blocked_words = load_blacklist()
+    for word in blocked_words:
+        text = text.replace(word, '')
+
+    # 2. ניקוי קבוע של קישורים ומספרים
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'www\.\S+', '', text)
+    text = re.sub(r'@\S+', '', text)
+    text = re.sub(r'\d{2,3}[-\s]?\d{3}[-\s]?\d{4}', '', text)
+    text = re.sub(r'[^\w\s.,!?()\u0590-\u05FF]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+def has_audio_stream(file_path):
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-i", file_path, "-show_streams", "-select_streams", "a", "-loglevel", "error"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return bool(result.stdout.strip())
+    except Exception as e:
+        logging.error(f"שגיאה בבדיקת שמע: {e}")
+        return True
+
+# 🔢 המרת מספרים לעברית - הפונקציה המלאה והמפורטת
+def num_to_hebrew_words(hour, minute):
+    hours_map = {
+        1: "אחת", 2: "שתיים", 3: "שלוש", 4: "ארבע", 5: "חמש", 6: "שש",
+        7: "שבע", 8: "שמונה", 9: "תשע", 10: "עשר", 11: "אחת עשרה", 12: "שתים עשרה", 0: "שתים עשרה"
+    }
+    minutes_map = {
+        0: "אפס", 1: "ודקה", 2: "ושתי דקות", 3: "ושלוש דקות", 4: "וארבע דקות",
+        5: "וחמש דקות", 6: "ושש דקות", 7: "ושבע דקות", 8: "ושמונה דקות",
+        9: "ותשע דקות", 10: "ועשרה", 11: "ואחת עשרה דקות", 12: "ושתים עשרה דקות",
+        13: "ושלוש עשרה דקות", 14: "וארבע עשרה דקות", 15: "ורבע", 
+        16: "ושש עשרה דקות", 17: "ושבע עשרה דקות", 18: "ושמונה עשרה דקות", 19: "ותשע עשרה דקות",
+        20: "ועשרים", 21: "עשרים ואחת", 22: "עשרים ושתיים", 23: "עשרים ושלוש",
+        24: "עשרים וארבע", 25: "עשרים וחמש", 26: "עשרים ושש", 27: "עשרים ושבע",
+        28: "עשרים ושמונה", 29: "עשרים ותשע", 30: "וחצי", 
+        31: "שלושים ואחת", 32: "שלושים ושתיים", 33: "שלושים ושלוש", 34: "שלושים וארבע",
+        35: "שלושים וחמש", 36: "שלושים ושש", 37: "שלושים ושבע", 38: "שלושים ושמונה", 39: "שלושים ותשע",
+        40: "וארבעים דקות", 41: "ארבעים ואחת", 42: "ארבעים ושתיים", 43: "ארבעים ושלוש",
+        44: "ארבעים וארבע", 45: "ארבעים וחמש", 46: "ארבעים ושש", 47: "ארבעים ושבע",
+        48: "ארבעים ושמונה", 49: "ארבעים ותשע", 50: "וחמישים דקות", 
+        51: "חמישים ואחת", 52: "חמישים ושתיים", 53: "חמישים ושלוש", 54: "חמישים וארבע",
+        55: "חמישים וחמש", 56: "חמישים ושש", 57: "חמישים ושבע", 58: "חמישים ושמונה", 59: "חמישים ותשע"
+    }
+    
+    hour_12 = hour % 12 or 12
+    # שימוש במיפוי או בברירת מחדל אם חסר משהו (למרות שהרשימה מלאה)
+    min_text = minutes_map.get(minute, f"ו{minute} דקות")
+    
+    # טיפול במקרים של שעה עגולה
+    if minute == 0:
+        return f"השעה {hours_map[hour_12]} בדיוק"
+        
+    return f"{hours_map[hour_12]} {min_text}"
+
+# 🎤 יצירת MP3
+def text_to_mp3(text, filename='output.mp3'):
+    if not text: return False
+    try:
+        client = texttospeech.TextToSpeechClient()
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(language_code="he-IL", name="he-IL-Wavenet-B", ssml_gender=texttospeech.SsmlVoiceGender.MALE)
+        audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=1.2)
+        response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+        with open(filename, "wb") as out:
+            out.write(response.audio_content)
+        return True
+    except Exception as e:
+        logging.error(f"שגיאה ביצירת TTS: {e}")
+        return False
+
+# 🎧 המרה ל־WAV
+def convert_to_wav(input_file, output_file='output.wav'):
+    subprocess.run(['ffmpeg', '-i', input_file, '-ar', '8000', '-ac', '1', '-f', 'wav', output_file, '-y'], stderr=subprocess.DEVNULL)
+
+# 🔗 חיבור קבצים
+def concat_wav_files(file_list, output_file="merged.wav"):
+    valid_files = [f for f in file_list if os.path.exists(f)]
+    if not valid_files:
+        return False
+    
+    list_filename = "list.txt"
+    with open(list_filename, "w", encoding="utf-8") as f:
+        for file_path in valid_files:
+            f.write(f"file '{file_path}'\n")
+    
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", list_filename, "-c", "copy", output_file
+    ], stderr=subprocess.DEVNULL)
+    
+    os.remove(list_filename)
+    return True
+
+# 📤 העלאה לימות
+def upload_to_ymot(wav_file_path, target_path):
+    url = 'https://call2all.co.il/ym/api/UploadFile'
+    try:
+        with open(wav_file_path, 'rb') as f:
+            files = {'file': (os.path.basename(wav_file_path), f, 'audio/wav')}
+            data = {'token': YMOT_TOKEN, 'path': target_path, 'convertAudio': '1', 'autoNumbering': 'true'}
+            response = requests.post(url, data=data, files=files)
+            logging.info(f"📞 הועלה ל-{target_path}: {response.text}")
+    except Exception as e:
+        logging.error(f"❌ שגיאה בהעלאה לימות: {e}")
+
+# 📥 טיפול בהודעה
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with processing_lock:
+        message = update.message or update.channel_post
+        if not message: return
+
+        chat_id = message.chat.id
+        logging.info(f"📢 התקבלה הודעה מערוץ: {chat_id}")
+
+        if chat_id not in CHANNELS_CONFIG:
+            logging.info(f"⚠️ ערוץ {chat_id} לא מוגדר בקונפיגורציה. מתעלם.")
+            return
+
+        config = CHANNELS_CONFIG[chat_id]
+        target_path = config["path"]
+        intro_suffix = config["intro_suffix"]
+        should_merge = config["merge_text"]
+
+        text_content = message.text or message.caption or ""
+        text_content = clean_text(text_content)
+
+        video_file_path = None
+        audio_file_path = None
+        
+        # 1. עיבוד מדיה
+        if message.video:
+            video_obj = await message.video.get_file()
+            video_file_path = "temp_video.mp4"
+            await video_obj.download_to_drive(video_file_path)
+            
+            if not has_audio_stream(video_file_path):
+                logging.info("🔇 וידאו ללא שמע זוהה. מדלג.")
+                os.remove(video_file_path)
+                return 
+            
+            convert_to_wav(video_file_path, "media_raw.wav")
+            audio_file_path = "media_raw.wav"
+            os.remove(video_file_path)
+
+        elif message.audio or message.voice:
+            audio_obj = await (message.audio or message.voice).get_file()
+            orig_path = "temp_audio.ogg"
+            await audio_obj.download_to_drive(orig_path)
+            convert_to_wav(orig_path, "media_raw.wav")
+            audio_file_path = "media_raw.wav"
+            os.remove(orig_path)
+
+        # 2. הכנת טקסטים (פתיח דינמי + גוף)
+        files_to_merge = []
+        
+        # יצירת פתיח דינמי עם שעה אמיתית
+        if intro_suffix:
+            # קבלת זמן נוכחי בישראל
+            tz = ZoneInfo('Asia/Jerusalem')
+            now = datetime.now(tz)
+            hebrew_time_str = num_to_hebrew_words(now.hour, now.minute)
+            
+            # הרכבת הטקסט: "ארבע וחצי במבזקים פלוס"
+            full_intro_text = f"{hebrew_time_str} {intro_suffix}"
+            
+            if text_to_mp3(full_intro_text, "intro.mp3"):
+                convert_to_wav("intro.mp3", "intro.wav")
+                files_to_merge.append("intro.wav")
+        
+        text_wav_path = None
+        if text_content:
+            if text_to_mp3(text_content, "body.mp3"):
+                convert_to_wav("body.mp3", "body.wav")
+                text_wav_path = "body.wav"
+
+        # 3. העלאה
+        
+        # תרחיש A+B: הכל בקובץ אחד
+        if should_merge:
+            if text_wav_path:
+                files_to_merge.append(text_wav_path)
+            if audio_file_path:
+                files_to_merge.append(audio_file_path)
+            
+            if files_to_merge:
+                concat_wav_files(files_to_merge, "final_upload.wav")
+                upload_to_ymot("final_upload.wav", target_path)
+        
+        # תרחיש C: בנפרד
+        else:
+            if audio_file_path:
+                upload_to_ymot(audio_file_path, target_path)
+            
+            # בניית קובץ הטקסט (פתיח + גוף) להעלאה נפרדת
+            text_files = []
+            if "intro.wav" in files_to_merge: text_files.append("intro.wav")
+            if text_wav_path: text_files.append(text_wav_path)
+            
+            if text_files:
+                concat_wav_files(text_files, "text_upload.wav")
+                upload_to_ymot("text_upload.wav", target_path)
+
+        # 🧹 ניקוי
+        for f in ["intro.mp3", "intro.wav", "body.mp3", "body.wav", 
+                  "media_raw.wav", "final_upload.wav", "text_upload.wav", "temp_video.mp4"]:
+            if os.path.exists(f):
+                try: os.remove(f)
+                except: pass
+
+# ---------------------------------------------------------
+# 🚀 הפעלה
+# ---------------------------------------------------------
+from keep_alive import keep_alive
+keep_alive()
+
+if __name__ == '__main__':
+    if not BOT_TOKEN:
+        logging.error("❌ BOT_TOKEN חסר!")
+        exit(1)
+        
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("addword", add_word))
+    app.add_handler(CommandHandler("delword", del_word))
+    app.add_handler(CommandHandler("listwords", list_words))
+    
+    app.add_handler(TypeHandler(Update, handle_message))
+    
+    logging.info("🚀 הבוט התחיל לרוץ...")
+    app.run_polling()
