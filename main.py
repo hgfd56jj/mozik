@@ -61,7 +61,7 @@ CHANNELS_CONFIG = {
     # ערוץ E (חדש - לשלוחה 55)
     -1005555555555: { # <--- להחליף למספר האמיתי
         "path": "ivr2:55/",
-        "intro_suffix": "בחדשות.", # ניתן לשנות לפי הצורך
+        "intro_suffix": "בעדכוני יְשִׁיבֶזֹוכֶר.", # ניתן לשנות לפי הצורך
         "merge_text": True
     }
 }
@@ -305,8 +305,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. הכנת טקסטים (פתיח דינמי + גוף)
         files_to_merge = []
         
-        # יצירת פתיח דינמי עם שעה אמיתית
-        if intro_suffix:
+        # בדיקה האם לדלג על הפתיח (אם זה וידאו ללא טקסט)
+        skip_intro = False
+        if message.video and not text_content:
+            skip_intro = True
+
+        # יצירת פתיח דינמי עם שעה אמיתית (רק אם לא מדלגים)
+        if intro_suffix and not skip_intro:
             # קבלת זמן נוכחי בישראל
             tz = ZoneInfo('Asia/Jerusalem')
             now = datetime.now(tz)
