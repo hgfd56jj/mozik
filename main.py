@@ -29,39 +29,35 @@ processing_lock = asyncio.Lock()
 # ---------------------------------------------------------
 # ⚙️ הגדרות הערוצים
 # ---------------------------------------------------------
-# כאן מגדירים את ה-ID של הערוץ, השלוחה בימות, והטקסט שבא *אחרי* השעה.
-# הבוט יגיד לבד: "{שעה נוכחית} {intro_suffix}"
-# לדוגמה: "ארבע וחצי במבזקים פלוס"
-
 CHANNELS_CONFIG = {
     # ערוץ A
     -1003308764465: {  
         "path": "ivr2:11/",
-        "intro_suffix": "בְּמִבְזָקִים-פְּלוּס,", # הטקסט שיבוא אחרי השעה
-        "merge_text": True  # לחבר טקסט ווידאו לקובץ אחד
+        "intro_suffix": "בְּמִבְזָקִים-פְּלוּס,", 
+        "merge_text": True  
     },
     # ערוץ B
     -1003387160676: {
         "path": "ivr2:22/",
-        "intro_suffix": "בחדשות המגזר.",
+        "intro_suffix": "בחדשות המגזר,",
         "merge_text": True
     },
     # ערוץ C
     -1003403882019: {
         "path": "ivr2:33/",
-        "intro_suffix": None, # ללא פתיח בכלל (רק תוכן ההודעה)
-        "merge_text": False # להעלות בנפרד
+        "intro_suffix": None, 
+        "merge_text": False 
     },
-    # ערוץ D (חדש - לשלוחה 44)
-    -1003427588105: { # <--- להחליף למספר האמיתי
+    # ערוץ D
+    -1003427588105: { 
         "path": "ivr2:44/",
-        "intro_suffix": "בחדשות המגזר.",
+        "intro_suffix": "בחדשות המגזר,",
         "merge_text": True
     },
-    # ערוץ E (חדש - לשלוחה 55)
-    -1003036595355: { # <--- להחליף למספר האמיתי
+    # ערוץ E
+    -1003036595355: { 
         "path": "ivr2:55/",
-        "intro_suffix": "בעדכוני יְשִׁיבֶזֹוכֶר.", # ניתן לשנות לפי הצורך
+        "intro_suffix": "בעדכוני יְשִׁיבֶזֹוכֶר,",
         "merge_text": True
     }
 }
@@ -170,7 +166,7 @@ def has_audio_stream(file_path):
         logging.error(f"שגיאה בבדיקת שמע: {e}")
         return True
 
-# 🔢 המרת מספרים לעברית - הפונקציה המלאה והמפורטת
+# 🔢 המרת מספרים לעברית
 def num_to_hebrew_words(hour, minute):
     hours_map = {
         1: "אחת", 2: "שתיים", 3: "שלוש", 4: "ארבע", 5: "חמש", 6: "שש",
@@ -195,10 +191,8 @@ def num_to_hebrew_words(hour, minute):
     }
     
     hour_12 = hour % 12 or 12
-    # שימוש במיפוי או בברירת מחדל אם חסר משהו (למרות שהרשימה מלאה)
     min_text = minutes_map.get(minute, f"ו{minute} דקות")
     
-    # טיפול במקרים של שעה עגולה
     if minute == 0:
         return f"השעה {hours_map[hour_12]} בדיוק"
         
@@ -279,7 +273,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video_file_path = None
         audio_file_path = None
         
-        # 1. עיבוד מדיה
+        # 1. עיבוד מדיה (וידאו/אודיו)
         if message.video:
             video_obj = await message.video.get_file()
             video_file_path = "temp_video.mp4"
@@ -302,7 +296,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             audio_file_path = "media_raw.wav"
             os.remove(orig_path)
 
-        # 2. הכנת טקסטים (פתיח דינמי + גוף)
+        # 2. הכנת טקסטים (פתיח + גוף)
         files_to_merge = []
         
         # בדיקה האם לדלג על הפתיח (אם זה וידאו ללא טקסט)
@@ -310,25 +304,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.video and not text_content:
             skip_intro = True
 
-        # יצירת פתיח דינמי עם שעה אמיתית (רק אם לא מדלגים)
+        full_intro_text = ""
         if intro_suffix and not skip_intro:
             # קבלת זמן נוכחי בישראל
             tz = ZoneInfo('Asia/Jerusalem')
             now = datetime.now(tz)
             hebrew_time_str = num_to_hebrew_words(now.hour, now.minute)
-            
-            # הרכבת הטקסט: "ארבע וחצי במבזקים פלוס"
             full_intro_text = f"{hebrew_time_str} {intro_suffix}"
-            
-            if text_to_mp3(full_intro_text, "intro.mp3"):
-                convert_to_wav("intro.mp3", "intro.wav")
-                files_to_merge.append("intro.wav")
-        
+
         text_wav_path = None
-        if text_content:
-            if text_to_mp3(text_content, "body.mp3"):
-                convert_to_wav("body.mp3", "body.wav")
-                text_wav_path = "body.wav"
+
+        # --- שינוי: חיבור הטקסטים לפני המרה לקול (אם צריך לחבר ויש גם פתיח וגם טקסט) ---
+        if should_merge and full_intro_text and text_content:
+            # מחברים את הטקסט למחרוזת אחת
+            combined_text = f"{full_intro_text} {text_content}"
+            if text_to_mp3(combined_text, "combined.mp3"):
+                convert_to_wav("combined.mp3", "combined.wav")
+                text_wav_path = "combined.wav"
+                # הערה: intro.wav לא נוצר במקרה הזה
+        
+        else:
+            # עבודה בשיטה הישנה (נפרד) או שאין מה לחבר (חסר אחד הרכיבים)
+            
+            # יצירת פתיח
+            if full_intro_text:
+                if text_to_mp3(full_intro_text, "intro.mp3"):
+                    convert_to_wav("intro.mp3", "intro.wav")
+                    files_to_merge.append("intro.wav")
+            
+            # יצירת גוף הודעה
+            if text_content:
+                if text_to_mp3(text_content, "body.mp3"):
+                    convert_to_wav("body.mp3", "body.wav")
+                    text_wav_path = "body.wav"
 
         # 3. העלאה
         
@@ -349,16 +357,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 upload_to_ymot(audio_file_path, target_path)
             
             # בניית קובץ הטקסט (פתיח + גוף) להעלאה נפרדת
-            text_files = []
-            if "intro.wav" in files_to_merge: text_files.append("intro.wav")
-            if text_wav_path: text_files.append(text_wav_path)
+            # במקרה של ערוץ C (לא should_merge), הקוד למעלה נכנס ל-else וייצר intro.wav בנפרד ו-body.wav בנפרד
+            # אנחנו נחבר אותם לקובץ טקסט אחד להעלאה
+            text_files_for_upload = []
+            if "intro.wav" in files_to_merge: text_files_for_upload.append("intro.wav")
+            if text_wav_path: text_files_for_upload.append(text_wav_path)
             
-            if text_files:
-                concat_wav_files(text_files, "text_upload.wav")
+            if text_files_for_upload:
+                concat_wav_files(text_files_for_upload, "text_upload.wav")
                 upload_to_ymot("text_upload.wav", target_path)
 
         # 🧹 ניקוי
-        for f in ["intro.mp3", "intro.wav", "body.mp3", "body.wav", 
+        for f in ["intro.mp3", "intro.wav", "body.mp3", "body.wav", "combined.mp3", "combined.wav",
                   "media_raw.wav", "final_upload.wav", "text_upload.wav", "temp_video.mp4"]:
             if os.path.exists(f):
                 try: os.remove(f)
