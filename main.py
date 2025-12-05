@@ -80,34 +80,36 @@ else:
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 
-# קובץ רשימה שחורה
+# קבצי הגדרות
 BLACKLIST_FILE = "blacklist.json"
+REPLACEMENTS_FILE = "replacements.json"
 
 # ---------------------------------------------------------
-# 🛡️ ניהול רשימה שחורה (Blacklist)
+# 🛡️ ניהול רשימות (Blacklist & Replacements)
 # ---------------------------------------------------------
-def load_blacklist():
-    if not os.path.exists(BLACKLIST_FILE):
-        return []
+def load_json_file(filename):
+    if not os.path.exists(filename):
+        return {} if filename == REPLACEMENTS_FILE else []
     try:
-        with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+        with open(filename, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
-        return []
+        return {} if filename == REPLACEMENTS_FILE else []
 
-def save_blacklist(words):
-    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, ensure_ascii=False, indent=2)
+def save_json_file(filename, data):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
+# --- פקודות לרשימה שחורה ---
 async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("usage: /addword [word]")
         return
     word = " ".join(context.args)
-    words = load_blacklist()
+    words = load_json_file(BLACKLIST_FILE)
     if word not in words:
         words.append(word)
-        save_blacklist(words)
+        save_json_file(BLACKLIST_FILE, words)
         await update.message.reply_text(f"המילה '{word}' נוספה לרשימה השחורה.")
     else:
         await update.message.reply_text("המילה כבר קיימת ברשימה.")
@@ -117,20 +119,62 @@ async def del_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("usage: /delword [word]")
         return
     word = " ".join(context.args)
-    words = load_blacklist()
+    words = load_json_file(BLACKLIST_FILE)
     if word in words:
         words.remove(word)
-        save_blacklist(words)
+        save_json_file(BLACKLIST_FILE, words)
         await update.message.reply_text(f"המילה '{word}' הוסרה מהרשימה.")
     else:
         await update.message.reply_text("המילה לא נמצאה ברשימה.")
 
 async def list_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    words = load_blacklist()
+    words = load_json_file(BLACKLIST_FILE)
     if not words:
         await update.message.reply_text("הרשימה ריקה.")
     else:
         await update.message.reply_text("מילים חסומות:\n" + ", ".join(words))
+
+# --- פקודות להחלפת מילים ---
+async def add_replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # שימוש: /addreplace מקור יעד
+    # דוגמה: /addreplace ר' רבי
+    if len(context.args) < 2:
+        await update.message.reply_text("usage: /addreplace [source] [target]")
+        return
+    
+    source = context.args[0]
+    target = " ".join(context.args[1:])
+    
+    replacements = load_json_file(REPLACEMENTS_FILE)
+    replacements[source] = target
+    save_json_file(REPLACEMENTS_FILE, replacements)
+    
+    await update.message.reply_text(f"הוגדרה החלפה: '{source}' -> '{target}'")
+
+async def del_replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("usage: /delreplace [source]")
+        return
+    
+    source = context.args[0]
+    replacements = load_json_file(REPLACEMENTS_FILE)
+    
+    if source in replacements:
+        del replacements[source]
+        save_json_file(REPLACEMENTS_FILE, replacements)
+        await update.message.reply_text(f"ההחלפה עבור '{source}' נמחקה.")
+    else:
+        await update.message.reply_text(f"לא נמצאה החלפה עבור '{source}'.")
+
+async def list_replace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    replacements = load_json_file(REPLACEMENTS_FILE)
+    if not replacements:
+        await update.message.reply_text("רשימת ההחלפות ריקה.")
+    else:
+        msg = "רשימת החלפות:\n"
+        for k, v in replacements.items():
+            msg += f"{k} -> {v}\n"
+        await update.message.reply_text(msg)
 
 # ---------------------------------------------------------
 # 🧹 פונקציות עזר לניקוי ועיבוד
@@ -138,12 +182,22 @@ async def list_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def clean_text(text):
     if not text: return ""
     
-    # 1. ניקוי לפי רשימה שחורה דינמית
-    blocked_words = load_blacklist()
+    # 1. ביצוע החלפות מילים (לפי הקובץ החדש)
+    replacements = load_json_file(REPLACEMENTS_FILE)
+    # ממיינים מהארוך לקצר כדי למנוע החלפות חלקיות שגויות
+    sorted_keys = sorted(replacements.keys(), key=len, reverse=True)
+    
+    for src in sorted_keys:
+        target = replacements[src]
+        # החלפה פשוטה (case sensitive פחות קריטי בעברית, אבל נשאיר ככה)
+        text = text.replace(src, target)
+
+    # 2. ניקוי לפי רשימה שחורה דינמית
+    blocked_words = load_json_file(BLACKLIST_FILE)
     for word in blocked_words:
         text = text.replace(word, '')
 
-    # 2. ניקוי קבוע של קישורים ומספרים
+    # 3. ניקוי קבוע של קישורים ומספרים
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
     text = re.sub(r'@\S+', '', text)
@@ -172,8 +226,6 @@ def has_audio_stream(file_path):
             return False
 
         # שלב 2: בדיקת עוצמת שמע (Volume Detection)
-        # נריץ את ffmpeg עם פילטר volumedetect כדי למצוא את העוצמה המקסימלית
-        # אנו בודקים רק את ה-20 שניות הראשונות כדי לחסוך זמן עיבוד, זה מספיק כדי לדעת אם הקובץ ריק
         cmd_vol = [
             "ffmpeg",
             "-t", "20", 
@@ -184,26 +236,21 @@ def has_audio_stream(file_path):
             "/dev/null"
         ]
         
-        # הפלט של volumedetect נכתב ל-stderr
         result_vol = subprocess.run(cmd_vol, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         output = result_vol.stderr
         
-        # חיפוש הערך max_volume בפלט
-        # הפלט נראה כמו: [Parsed_volumedetect_0 @ ...] max_volume: -20.5 dB
         match = re.search(r"max_volume: ([\-\d\.]+) dB", output)
         if match:
             max_vol = float(match.group(1))
             logging.info(f"🔊 עוצמת שמע מקסימלית זוהתה: {max_vol} dB")
             
-            # סף רגישות: -91dB נחשב לשקט מוחלט דיגיטלי ב-16bit.
-            # נחמיר קצת ונגיד שאם המקסימום הוא מתחת ל -50dB, זה כנראה רעש רקע או שקט.
             if max_vol < -50.0:
                 logging.info("🔇 עוצמת השמע נמוכה מדי (שקט), מדלג.")
                 return False
             return True
         else:
             logging.warning("⚠️ לא הצלחתי לזהות עוצמת שמע, מניח שיש שמע.")
-            return True # ליתר ביטחון
+            return True 
             
     except Exception as e:
         logging.error(f"❌ שגיאה בבדיקת שמע: {e}")
@@ -432,6 +479,11 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("addword", add_word))
     app.add_handler(CommandHandler("delword", del_word))
     app.add_handler(CommandHandler("listwords", list_words))
+    
+    # פקודות להחלפת מילים
+    app.add_handler(CommandHandler("addreplace", add_replace))
+    app.add_handler(CommandHandler("delreplace", del_replace))
+    app.add_handler(CommandHandler("listreplace", list_replace))
     
     app.add_handler(TypeHandler(Update, handle_message))
     
