@@ -154,23 +154,34 @@ def clean_text(text):
     return text
 
 def has_audio_stream(file_path):
+    """בודק בצורה מחמירה אם יש ערוץ שמע"""
     try:
-        result = subprocess.run(
-            ["ffprobe", "-i", file_path, "-show_streams", "-select_streams", "a", "-loglevel", "error"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        return bool(result.stdout.strip())
+        # שימוש ב-ffprobe כדי לקבל מידע על הזרמים בקובץ
+        cmd = [
+            "ffprobe", 
+            "-v", "error", 
+            "-select_streams", "a", 
+            "-show_entries", "stream=codec_name", 
+            "-of", "default=noprint_wrappers=1:nokey=1", 
+            file_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        # אם הפלט לא ריק, סימן שיש ערוץ שמע
+        if result.stdout.strip():
+            return True
+        else:
+            return False
+            
     except Exception as e:
         logging.error(f"שגיאה בבדיקת שמע: {e}")
-        return True
+        return False # במקרה של שגיאה נניח שאין שמע כדי לא להעלות סתם
 
 # 🔢 המרת מספרים לעברית
 def num_to_hebrew_words(hour, minute):
     hours_map = {
         1: "אחת", 2: "שתיים", 3: "שלוש", 4: "ארבע", 5: "חמש", 6: "שש",
-        7: "שבע", 8: "שמונה", 9: "תֵּשַׁע", 10: "עשר", 11: "אחת עשרה", 12: "שתים עשרה", 0: "שתים עשרה"
+        7: "שבע", 8: "שמונה", 9: "תֵּשַׁע", 10: "עשר", 11: "אחת עשרה", 12: "שתים עשרה", 0: "שתים עשרה"
     }
     minutes_map = {
         0: "אפס", 1: "ודקה", 2: "ושתי דקות", 3: "ושלוש דקות", 4: "וארבע דקות",
@@ -274,15 +285,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio_file_path = None
         
         # 1. עיבוד מדיה (וידאו/אודיו)
-        if message.video:
-            video_obj = await message.video.get_file()
-            video_file_path = "temp_video.mp4"
-            await video_obj.download_to_drive(video_file_path)
+        if message.video or message.animation: # הוספת תמיכה ב-Animation (GIF)
+            # אם זה אנימציה, זה בדרך כלל ללא שמע
+            media_obj = message.video or message.animation
+            is_animation = message.animation is not None
             
-            if not has_audio_stream(video_file_path):
-                logging.info("🔇 וידאו ללא שמע זוהה. מדלג.")
+            video_file = await media_obj.get_file()
+            video_file_path = "temp_video.mp4"
+            await video_file.download_to_drive(video_file_path)
+            
+            # בדיקת שמע - מחמירה יותר
+            has_audio = has_audio_stream(video_file_path)
+            
+            if is_animation:
+                 logging.info("🔇 זוהה קובץ אנימציה (GIF). נחשב כחסר שמע.")
+                 has_audio = False # אנימציות הן לרוב ללא שמע
+
+            if not has_audio:
+                logging.info("🔇 וידאו ללא שמע זוהה. מדלג על ההעלאה.")
                 os.remove(video_file_path)
-                return 
+                return # לא מעלים וידאו ללא שמע
             
             convert_to_wav(video_file_path, "media_raw.wav")
             audio_file_path = "media_raw.wav"
@@ -299,14 +321,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 2. הכנת טקסטים (פתיח + גוף)
         files_to_merge = []
         
-        # בדיקה האם לדלג על הפתיח (אם זה וידאו ללא טקסט)
-        skip_intro = False
-        if message.video and not text_content:
-            skip_intro = True
-
+        # --- תיקון: יצירת פתיח רק אם יש טקסט להודעה ---
+        # אם יש מדיה (אודיו/וידאו) אבל אין טקסט - לא ניצור פתיח (כי הוא מיותר)
+        # אם זו הודעת טקסט בלבד - ברור שצריך פתיח
+        # אם זו הודעה משולבת - צריך פתיח
+        
+        need_intro = False
+        if text_content: 
+            need_intro = True # יש טקסט, אז צריך פתיח
+        
         full_intro_text = ""
-        if intro_suffix and not skip_intro:
-            # קבלת זמן נוכחי בישראל
+        if intro_suffix and need_intro:
             tz = ZoneInfo('Asia/Jerusalem')
             now = datetime.now(tz)
             hebrew_time_str = num_to_hebrew_words(now.hour, now.minute)
@@ -314,19 +339,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text_wav_path = None
 
-        # --- שינוי: חיבור הטקסטים לפני המרה לקול (אם צריך לחבר ויש גם פתיח וגם טקסט) ---
+        # --- חיבור הטקסטים לפני המרה לקול (אם צריך לחבר ויש גם פתיח וגם טקסט) ---
         if should_merge and full_intro_text and text_content:
             # מחברים את הטקסט למחרוזת אחת
             combined_text = f"{full_intro_text} {text_content}"
             if text_to_mp3(combined_text, "combined.mp3"):
                 convert_to_wav("combined.mp3", "combined.wav")
                 text_wav_path = "combined.wav"
-                # הערה: intro.wav לא נוצר במקרה הזה
         
         else:
             # עבודה בשיטה הישנה (נפרד) או שאין מה לחבר (חסר אחד הרכיבים)
             
-            # יצירת פתיח
+            # יצירת פתיח - רק אם צריך!
             if full_intro_text:
                 if text_to_mp3(full_intro_text, "intro.mp3"):
                     convert_to_wav("intro.mp3", "intro.wav")
@@ -357,8 +381,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 upload_to_ymot(audio_file_path, target_path)
             
             # בניית קובץ הטקסט (פתיח + גוף) להעלאה נפרדת
-            # במקרה של ערוץ C (לא should_merge), הקוד למעלה נכנס ל-else וייצר intro.wav בנפרד ו-body.wav בנפרד
-            # אנחנו נחבר אותם לקובץ טקסט אחד להעלאה
             text_files_for_upload = []
             if "intro.wav" in files_to_merge: text_files_for_upload.append("intro.wav")
             if text_wav_path: text_files_for_upload.append(text_wav_path)
