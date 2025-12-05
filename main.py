@@ -154,10 +154,10 @@ def clean_text(text):
     return text
 
 def has_audio_stream(file_path):
-    """בודק בצורה מחמירה אם יש ערוץ שמע"""
+    """בודק האם יש ערוץ שמע, והאם הוא מכיל סאונד בעוצמה מינימלית"""
     try:
-        # שימוש ב-ffprobe כדי לקבל מידע על הזרמים בקובץ
-        cmd = [
+        # שלב 1: בדיקה טכנית לקיום ערוץ שמע
+        cmd_streams = [
             "ffprobe", 
             "-v", "error", 
             "-select_streams", "a", 
@@ -165,17 +165,49 @@ def has_audio_stream(file_path):
             "-of", "default=noprint_wrappers=1:nokey=1", 
             file_path
         ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(cmd_streams, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
-        # אם הפלט לא ריק, סימן שיש ערוץ שמע
-        if result.stdout.strip():
+        if not result.stdout.strip():
+            logging.info("🔇 FFprobe: לא נמצא ערוץ שמע (Stream) בקובץ.")
+            return False
+
+        # שלב 2: בדיקת עוצמת שמע (Volume Detection)
+        # נריץ את ffmpeg עם פילטר volumedetect כדי למצוא את העוצמה המקסימלית
+        # אנו בודקים רק את ה-20 שניות הראשונות כדי לחסוך זמן עיבוד, זה מספיק כדי לדעת אם הקובץ ריק
+        cmd_vol = [
+            "ffmpeg",
+            "-t", "20", 
+            "-i", file_path,
+            "-af", "volumedetect",
+            "-vn", "-sn", "-dn", 
+            "-f", "null", 
+            "/dev/null"
+        ]
+        
+        # הפלט של volumedetect נכתב ל-stderr
+        result_vol = subprocess.run(cmd_vol, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output = result_vol.stderr
+        
+        # חיפוש הערך max_volume בפלט
+        # הפלט נראה כמו: [Parsed_volumedetect_0 @ ...] max_volume: -20.5 dB
+        match = re.search(r"max_volume: ([\-\d\.]+) dB", output)
+        if match:
+            max_vol = float(match.group(1))
+            logging.info(f"🔊 עוצמת שמע מקסימלית זוהתה: {max_vol} dB")
+            
+            # סף רגישות: -91dB נחשב לשקט מוחלט דיגיטלי ב-16bit.
+            # נחמיר קצת ונגיד שאם המקסימום הוא מתחת ל -50dB, זה כנראה רעש רקע או שקט.
+            if max_vol < -50.0:
+                logging.info("🔇 עוצמת השמע נמוכה מדי (שקט), מדלג.")
+                return False
             return True
         else:
-            return False
+            logging.warning("⚠️ לא הצלחתי לזהות עוצמת שמע, מניח שיש שמע.")
+            return True # ליתר ביטחון
             
     except Exception as e:
-        logging.error(f"שגיאה בבדיקת שמע: {e}")
-        return False # במקרה של שגיאה נניח שאין שמע כדי לא להעלות סתם
+        logging.error(f"❌ שגיאה בבדיקת שמע: {e}")
+        return False
 
 # 🔢 המרת מספרים לעברית
 def num_to_hebrew_words(hour, minute):
@@ -285,8 +317,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         audio_file_path = None
         
         # 1. עיבוד מדיה (וידאו/אודיו)
-        if message.video or message.animation: # הוספת תמיכה ב-Animation (GIF)
-            # אם זה אנימציה, זה בדרך כלל ללא שמע
+        if message.video or message.animation: 
             media_obj = message.video or message.animation
             is_animation = message.animation is not None
             
@@ -294,21 +325,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             video_file_path = "temp_video.mp4"
             await video_file.download_to_drive(video_file_path)
             
-            # בדיקת שמע - מחמירה יותר
+            # בדיקת שמע משודרגת
             has_audio = has_audio_stream(video_file_path)
             
             if is_animation:
                  logging.info("🔇 זוהה קובץ אנימציה (GIF). נחשב כחסר שמע.")
-                 has_audio = False # אנימציות הן לרוב ללא שמע
+                 has_audio = False 
 
             if not has_audio:
                 logging.info("🔇 וידאו ללא שמע זוהה. מדלג על ההעלאה.")
-                os.remove(video_file_path)
-                return # לא מעלים וידאו ללא שמע
+                if os.path.exists(video_file_path):
+                    os.remove(video_file_path)
+                return 
             
             convert_to_wav(video_file_path, "media_raw.wav")
             audio_file_path = "media_raw.wav"
-            os.remove(video_file_path)
+            if os.path.exists(video_file_path):
+                os.remove(video_file_path)
 
         elif message.audio or message.voice:
             audio_obj = await (message.audio or message.voice).get_file()
@@ -316,19 +349,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await audio_obj.download_to_drive(orig_path)
             convert_to_wav(orig_path, "media_raw.wav")
             audio_file_path = "media_raw.wav"
-            os.remove(orig_path)
+            if os.path.exists(orig_path):
+                os.remove(orig_path)
 
         # 2. הכנת טקסטים (פתיח + גוף)
         files_to_merge = []
         
-        # --- תיקון: יצירת פתיח רק אם יש טקסט להודעה ---
-        # אם יש מדיה (אודיו/וידאו) אבל אין טקסט - לא ניצור פתיח (כי הוא מיותר)
-        # אם זו הודעת טקסט בלבד - ברור שצריך פתיח
-        # אם זו הודעה משולבת - צריך פתיח
-        
         need_intro = False
         if text_content: 
-            need_intro = True # יש טקסט, אז צריך פתיח
+            need_intro = True 
         
         full_intro_text = ""
         if intro_suffix and need_intro:
@@ -339,32 +368,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text_wav_path = None
 
-        # --- חיבור הטקסטים לפני המרה לקול (אם צריך לחבר ויש גם פתיח וגם טקסט) ---
+        # --- חיבור הטקסטים לפני המרה לקול ---
         if should_merge and full_intro_text and text_content:
-            # מחברים את הטקסט למחרוזת אחת
             combined_text = f"{full_intro_text} {text_content}"
             if text_to_mp3(combined_text, "combined.mp3"):
                 convert_to_wav("combined.mp3", "combined.wav")
                 text_wav_path = "combined.wav"
         
         else:
-            # עבודה בשיטה הישנה (נפרד) או שאין מה לחבר (חסר אחד הרכיבים)
-            
-            # יצירת פתיח - רק אם צריך!
             if full_intro_text:
                 if text_to_mp3(full_intro_text, "intro.mp3"):
                     convert_to_wav("intro.mp3", "intro.wav")
                     files_to_merge.append("intro.wav")
             
-            # יצירת גוף הודעה
             if text_content:
                 if text_to_mp3(text_content, "body.mp3"):
                     convert_to_wav("body.mp3", "body.wav")
                     text_wav_path = "body.wav"
 
         # 3. העלאה
-        
-        # תרחיש A+B: הכל בקובץ אחד
         if should_merge:
             if text_wav_path:
                 files_to_merge.append(text_wav_path)
@@ -375,12 +397,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 concat_wav_files(files_to_merge, "final_upload.wav")
                 upload_to_ymot("final_upload.wav", target_path)
         
-        # תרחיש C: בנפרד
         else:
             if audio_file_path:
                 upload_to_ymot(audio_file_path, target_path)
             
-            # בניית קובץ הטקסט (פתיח + גוף) להעלאה נפרדת
             text_files_for_upload = []
             if "intro.wav" in files_to_merge: text_files_for_upload.append("intro.wav")
             if text_wav_path: text_files_for_upload.append(text_wav_path)
@@ -391,7 +411,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🧹 ניקוי
         for f in ["intro.mp3", "intro.wav", "body.mp3", "body.wav", "combined.mp3", "combined.wav",
-                  "media_raw.wav", "final_upload.wav", "text_upload.wav", "temp_video.mp4"]:
+                  "media_raw.wav", "final_upload.wav", "text_upload.wav", "temp_video.mp4", "temp_audio.ogg"]:
             if os.path.exists(f):
                 try: os.remove(f)
                 except: pass
