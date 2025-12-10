@@ -200,6 +200,10 @@ def clean_text(text):
     # 3. ניקוי קבוע של קישורים ומספרים
     text = re.sub(r'https?://\S+', '', text)
     text = re.sub(r'www\.\S+', '', text)
+    text = re.sub(r'chat\.whatsapp\.com\S*', '', text)
+    text = re.sub(r'wa\.me\S*', '', text)
+    text = re.sub(r't\.me\S*', '', text)
+    text = re.sub(r'[a-zA-Z0-9-]+\.(com|co\.il|net|org|me)\S*', '', text)
     text = re.sub(r'@\S+', '', text)
     text = re.sub(r'\d{2,3}[-\s]?\d{3}[-\s]?\d{4}', '', text)
     text = re.sub(r'[^\w\s.,!?()\u0590-\u05FF]', '', text)
