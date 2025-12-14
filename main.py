@@ -85,6 +85,8 @@ YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 BLACKLIST_FILE = "blacklist.json"
 REPLACEMENTS_FILE = "replacements.json"
 HISTORY_FILE_A = "history_channel_a.json"  # הוספה: קובץ היסטוריה לערוץ A
+KIKAR_HISTORY_FILE = "kikar_history.json" # היסטוריה לוידאו מכיכר השבת
+KIKAR_URL = "https://www.kikar.co.il/mayriv"
 
 # ---------------------------------------------------------
 # 🛡️ ניהול רשימות (Blacklist & Replacements)
@@ -345,6 +347,66 @@ def upload_to_ymot(wav_file_path, target_path):
     except Exception as e:
         logging.error(f"❌ שגיאה בהעלאה לימות: {e}")
 
+# 📺 בדיקת וידאו בכיכר השבת
+async def check_kikar_feed(context: ContextTypes.DEFAULT_TYPE):
+    """בודק אם יש וידאו חדש בכיכר השבת (דף 'מעריב') ומעלה לשלוחה 44"""
+    try:
+        logging.info("Checking Kikar HaShabbat for new video...")
+        
+        # 1. שליפת ה-HTML
+        response = requests.get(KIKAR_URL, timeout=15)
+        if response.status_code != 200:
+            logging.warning(f"Kikar fetch failed: {response.status_code}")
+            return
+        
+        html = response.text
+        
+        # 2. חיפוש קובץ MP4
+        # מחפשים URL שמסתיים ב-mp4 (בדרך כלל הנגן מכיל לינק ישיר או דרך minio/cdn)
+        match = re.search(r'(https?://[^"\s<>]+\.mp4)', html)
+        
+        if not match:
+            logging.info("No MP4 link found in Kikar page.")
+            return
+
+        video_url = match.group(1)
+        
+        # 3. בדיקה מול היסטוריה
+        history = load_json_file(KIKAR_HISTORY_FILE)
+        # נוודא שזה רשימה (תאימות ל-load_json_file שמחזיר רשימה כברירת מחדל)
+        if not isinstance(history, list):
+            history = []
+
+        if video_url in history:
+            logging.info("Video already processed. Skipping.")
+            return
+            
+        logging.info(f"🆕 Found NEW Kikar video: {video_url}")
+
+        # 4. הורדה
+        r = requests.get(video_url, stream=True)
+        temp_video = "temp_kikar.mp4"
+        with open(temp_video, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        # 5. המרה ל-WAV
+        convert_to_wav(temp_video, "kikar_out.wav")
+        
+        # 6. העלאה לשלוחה 44 (ללא פתיח, ישירות)
+        upload_to_ymot("kikar_out.wav", "ivr2:44/")
+        
+        # 7. עדכון היסטוריה (שומרים רק את האחרון, או רשימה קצרה)
+        history = [video_url] # שומרים רק את החדש ביותר כדי לחסוך מקום, או אפשר append
+        save_json_file(KIKAR_HISTORY_FILE, history)
+        
+        # ניקוי
+        if os.path.exists(temp_video): os.remove(temp_video)
+        if os.path.exists("kikar_out.wav"): os.remove("kikar_out.wav")
+
+    except Exception as e:
+        logging.error(f"❌ Error in kikar check: {e}")
+
 # 📥 טיפול בהודעה
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with processing_lock:
@@ -516,6 +578,13 @@ if __name__ == '__main__':
         
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
+    # משימה מתוזמנת: בדיקת כיכר השבת כל שעה (3600 שניות)
+    if app.job_queue:
+        app.job_queue.run_repeating(check_kikar_feed, interval=3600, first=10)
+        logging.info("✅ משימת בדיקת כיכר השבת תוזמנה.")
+    else:
+        logging.warning("⚠️ JobQueue אינו זמין, בדיקת כיכר השבת לא תפעל.")
+
     app.add_handler(CommandHandler("addword", add_word))
     app.add_handler(CommandHandler("delword", del_word))
     app.add_handler(CommandHandler("listwords", list_words))
