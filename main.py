@@ -12,6 +12,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, TypeHandler, CommandHandler
 from google.cloud import texttospeech
 import logging
+from difflib import SequenceMatcher  # הוספה: ספרייה לבדיקת דמיון בין טקסטים
 
 # 🔧 הגדרת לוגים
 logging.basicConfig(
@@ -83,6 +84,7 @@ YMOT_TOKEN = os.getenv("YMOT_TOKEN")
 # קבצי הגדרות
 BLACKLIST_FILE = "blacklist.json"
 REPLACEMENTS_FILE = "replacements.json"
+HISTORY_FILE_A = "history_channel_a.json"  # הוספה: קובץ היסטוריה לערוץ A
 
 # ---------------------------------------------------------
 # 🛡️ ניהול רשימות (Blacklist & Replacements)
@@ -268,7 +270,7 @@ def num_to_hebrew_words(hour, minute):
     }
     minutes_map = {
         0: "אפס", 1: "ודקה", 2: "ושתי דקות", 3: "ושלוש דקות", 4: "וארבע דקות",
-        5: "וחמשה", 6: "ושש דקות", 7: "ושבע דקות", 8: "ושמונה דקות",
+        5: "וחמישה", 6: "ושש דקות", 7: "ושבע דקות", 8: "ושמונה דקות",
         9: "ותשע דקות", 10: "וַעֲשָׂרָה", 11: "ואחת עשרה דקות", 12: "ושתים עשרה דקות",
         13: "ושלוש עשרה דקות", 14: "וארבע עשרה דקות", 15: "ורבע", 
         16: "ושש עשרה דקות", 17: "ושבע עשרה דקות", 18: "ושמונה עשרה דקות", 19: "ותשע עשרה דקות",
@@ -288,7 +290,7 @@ def num_to_hebrew_words(hour, minute):
     min_text = minutes_map.get(minute, f"ו{minute} דקות")
     
     if minute == 0:
-        return f"השעה {hours_map[hour_12]} בדיוק"
+        return f"השעה {hours_map[hour_12]}"
         
     return f"{hours_map[hour_12]} {min_text}"
 
@@ -363,6 +365,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text_content = message.text or message.caption or ""
         text_content = clean_text(text_content)
+
+        # ---------------------------------------------------------------------
+        # הוספה: מנגנון בדיקת כפילות לערוץ A (לפי מילים, סף 60%, היסטוריה 60)
+        # ---------------------------------------------------------------------
+        if chat_id == -1003308764465 and text_content:  # בדיקה רק לערוץ A ורק אם יש טקסט
+            history = load_json_file(HISTORY_FILE_A)
+            if not isinstance(history, list):
+                history = []
+            
+            new_words = text_content.split()
+            is_duplicate = False
+            
+            # בדיקה רק אם יש מילים להשוות
+            if new_words:
+                for old_text in history:
+                    old_words = old_text.split()
+                    # חישוב דמיון (בין 0 ל-1) לפי רצף מילים
+                    similarity = SequenceMatcher(None, new_words, old_words).ratio()
+                    
+                    if similarity > 0.6:  # אם הדמיון גבוה מ-60%
+                        logging.info(f"🚫 זוהתה הודעה כפולה בערוץ A (דמיון: {similarity:.2f}). מדלג על ההעלאה.")
+                        is_duplicate = True
+                        break
+            
+            if is_duplicate:
+                return  # עצור כאן ואל תמשיך לטיפול בהודעה
+            
+            # אם לא כפול, הוסף להיסטוריה ושמור
+            history.append(text_content)
+            # הגבלה ל-60 הודעות אחרונות
+            if len(history) > 60:
+                history = history[-60:]
+            save_json_file(HISTORY_FILE_A, history)
+        # ---------------------------------------------------------------------
 
         video_file_path = None
         audio_file_path = None
